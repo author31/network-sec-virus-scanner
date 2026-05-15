@@ -1,0 +1,32 @@
+[
+  {
+    "name": "win-api-process-injection",
+    "pattern": "CreateRemoteThread|VirtualAllocEx|WriteProcessMemory",
+    "severity": "high",
+    "description": "Windows APIs commonly chained for code injection."
+  },
+  {
+    "name": "powershell-encoded-command",
+    "pattern": "(?i)powershell(\\.exe)?\\s+-(?:e|en|enc|encodedcommand)\\b",
+    "severity": "high",
+    "description": "PowerShell launched with -EncodedCommand obfuscation."
+  },
+  {
+    "name": "cmd-shell-invoke",
+    "pattern": "(?i)cmd\\.exe\\s+/c\\b",
+    "severity": "medium",
+    "description": "Command shell invocation."
+  },
+  {
+    "name": "long-base64-blob",
+    "pattern": "[A-Za-z0-9+/]{200,}={0,2}",
+    "severity": "medium",
+    "description": "Long base64-shaped run that often hides payloads."
+  },
+  {
+    "name": "shell-eval-marker",
+    "pattern": "\\b(?:eval|exec|system)\\s*\\(",
+    "severity": "medium",
+    "description": "Dynamic code/command execution call."
+  }
+]

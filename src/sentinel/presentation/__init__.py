@@ -1,3 +1,11 @@
+from .cli import (
+    EXIT_CLEAN,
+    EXIT_ERROR,
+    EXIT_INFECTED,
+    build_parser,
+    main as cli_main,
+    run_scan,
+)
 from .report import (
     Finding,
     REPORT_FILENAME_PREFIX,
@@ -15,17 +23,23 @@ from .report import (
 )
 
 __all__ = [
+    "EXIT_CLEAN",
+    "EXIT_ERROR",
+    "EXIT_INFECTED",
     "Finding",
     "REPORT_FILENAME_PREFIX",
     "REPORT_FILENAME_SUFFIX",
     "ScanReport",
     "SUMMARY_FOOTER",
     "SUMMARY_HEADER",
+    "build_parser",
     "build_report",
+    "cli_main",
     "default_report_path",
     "finding_from_hash",
     "finding_from_heuristic",
     "finding_from_pattern",
     "render_report",
+    "run_scan",
     "write_report",
 ]

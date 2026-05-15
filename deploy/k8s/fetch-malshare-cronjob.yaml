@@ -1,0 +1,87 @@
+# Sentinel — daily Malshare signature DB refresh (Kubernetes CronJob).
+#
+# Prerequisites (one-time):
+#   1. Rotate the Malshare API key (the prior key has been leaked in issue
+#      history; treat as compromised).
+#   2. Create the Secret holding the rotated key:
+#        kubectl -n sentinel create secret generic sentinel-malshare \
+#          --from-literal=MALSHARE_API_KEY='<rotated-key>'
+#      Never commit the key value to git; this manifest references it by
+#      name only.
+#   3. Provision a PersistentVolumeClaim "sentinel-data" (RWX or scheduled
+#      single-writer RWO) that backs /data/signatures.json across runs.
+#
+# Schedule: 03:17 UTC daily — a few minutes after the Malshare 24h feed
+# rolls over. timeZone is set explicitly so the cluster's local TZ does
+# not change when the job fires.
+#
+# Failure surfacing: backoffLimit=0 means a failed Job is recorded as a
+# failure (not silently retried). Alert by watching for
+#   kube_job_status_failed{job_name=~"fetch-malshare-.*"} > 0
+# in your metrics pipeline; the on-call page is wired via your existing
+# JobFailed alert (oncall@example.com).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sentinel-fetch-malshare
+  namespace: sentinel
+  labels:
+    app: sentinel
+    component: signature-refresh
+spec:
+  schedule: "17 03 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: sentinel
+            component: signature-refresh
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: fetch-malshare
+              image: ghcr.io/example/sentinel:latest
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - scripts/fetch_malshare.py
+                - --output
+                - /data/signatures.json
+              env:
+                - name: MALSHARE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: sentinel-malshare
+                      key: MALSHARE_API_KEY
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: sentinel-data

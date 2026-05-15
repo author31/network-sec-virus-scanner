@@ -386,6 +386,121 @@ def test_scan_invalid_bloom_fp_rate_exits_error(
     assert "bloom-fp-rate" in err
 
 
+def test_daemon_help_lists_start(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["daemon", "--help"])
+    assert exc.value.code == 0
+    assert "start" in capsys.readouterr().out
+
+
+def test_daemon_start_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["daemon", "start", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    for token in (
+        "--schedule",
+        "--run-now",
+        "--detach",
+        "--pidfile",
+        "--threat-level",
+        "--timeout",
+        "--output",
+    ):
+        assert token in out
+
+
+def test_daemon_start_rejects_invalid_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("MALSHARE_API_KEY", "k")
+    code = main(["daemon", "start", "--schedule", "bogus"])
+    assert code == EXIT_ERROR
+    assert "invalid --schedule" in capsys.readouterr().err
+
+
+def test_daemon_start_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("MALSHARE_API_KEY", raising=False)
+    code = main(["daemon", "start"])
+    assert code == EXIT_ERROR
+    assert "MALSHARE_API_KEY" in capsys.readouterr().err
+
+
+def test_daemon_start_invokes_run_daemon_when_config_valid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Schedule + key OK → control reaches run_daemon with the expected config."""
+    from sentinel.presentation import cli as cli_mod
+
+    monkeypatch.setenv("MALSHARE_API_KEY", "k")
+    seen: dict = {}
+
+    def fake_run_daemon(config):
+        seen["api_key"] = config.api_key
+        seen["expr"] = config.schedule.expression
+        seen["output"] = config.output
+        seen["run_now"] = config.run_now
+        seen["pidfile"] = config.pidfile
+        seen["threat_level"] = config.threat_level
+        seen["timeout"] = config.timeout
+        return 0
+
+    monkeypatch.setattr(cli_mod, "run_daemon", fake_run_daemon)
+
+    out = tmp_path / "sigs.json"
+    pid = tmp_path / "d.pid"
+    code = main(
+        [
+            "daemon",
+            "start",
+            "--schedule",
+            "*/30 * * * *",
+            "--output",
+            str(out),
+            "--pidfile",
+            str(pid),
+            "--run-now",
+            "--threat-level",
+            "high",
+            "--timeout",
+            "30",
+        ]
+    )
+    assert code == EXIT_CLEAN
+    assert seen == {
+        "api_key": "k",
+        "expr": "*/30 * * * *",
+        "output": out,
+        "run_now": True,
+        "pidfile": pid,
+        "threat_level": "high",
+        "timeout": 30,
+    }
+
+
+def test_daemon_start_uses_env_schedule_when_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sentinel.presentation import cli as cli_mod
+
+    monkeypatch.setenv("MALSHARE_API_KEY", "k")
+    monkeypatch.setenv("SENTINEL_SCHEDULE", "0 12 * * *")
+    seen: dict = {}
+
+    def fake_run_daemon(config):
+        seen["expr"] = config.schedule.expression
+        return 0
+
+    monkeypatch.setattr(cli_mod, "run_daemon", fake_run_daemon)
+    assert main(["daemon", "start"]) == EXIT_CLEAN
+    assert seen["expr"] == "0 12 * * *"
+
+
 def test_scan_default_report_path_when_omitted(
     tmp_path: Path,
     signature_db: Path,

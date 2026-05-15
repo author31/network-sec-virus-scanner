@@ -177,3 +177,43 @@ def test_empty_signature_list_loads(tmp_path: Path) -> None:
     assert len(repo) == 0
     assert list(repo.iter_patterns()) == []
     assert repo.lookup_md5("a" * 32) is None
+
+
+def test_bloom_disabled_by_default(tmp_path: Path) -> None:
+    repo = SignatureRepository.load(_write_json(tmp_path, VALID_ENTRIES))
+    assert repo.bloom_enabled is False
+    assert repo.bloom is None
+    assert repo.might_contain_hash("ff" * 16) is True
+
+
+def test_bloom_enabled_indexes_all_hashes(tmp_path: Path) -> None:
+    repo = SignatureRepository.load(
+        _write_json(tmp_path, VALID_ENTRIES), enable_bloom=True
+    )
+    assert repo.bloom_enabled is True
+    md5 = "44d88612fea8a8f36de82e1278abb02f"
+    sha = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
+    assert repo.might_contain_hash(md5) is True
+    assert repo.might_contain_hash(md5.upper()) is True
+    assert repo.might_contain_hash(sha) is True
+    assert repo.might_contain_hash("0123456789abcdef0123456789abcdef") is True
+
+
+def test_bloom_filters_obvious_negatives(tmp_path: Path) -> None:
+    repo = SignatureRepository.load(
+        _write_json(tmp_path, VALID_ENTRIES), enable_bloom=True
+    )
+    negatives = [f"{i:032x}" for i in range(50)]
+    not_seen = [n for n in negatives if not repo.might_contain_hash(n)]
+    assert len(not_seen) > 0
+
+
+def test_bloom_lookup_still_returns_signature(tmp_path: Path) -> None:
+    repo = SignatureRepository.load(
+        _write_json(tmp_path, VALID_ENTRIES),
+        enable_bloom=True,
+        bloom_fp_rate=0.001,
+    )
+    sig = repo.lookup_md5("44d88612fea8a8f36de82e1278abb02f")
+    assert sig is not None
+    assert sig.name == "EICAR-Test-File"

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
+from ..infrastructure import BloomFilter
 from .signature import Signature, ThreatLevel
 
 
@@ -120,7 +121,13 @@ class SignatureRepository:
     Provides O(1) hash lookups and an iterator over byte-pattern signatures.
     """
 
-    def __init__(self, signatures: Iterable[Signature]) -> None:
+    def __init__(
+        self,
+        signatures: Iterable[Signature],
+        *,
+        enable_bloom: bool = False,
+        bloom_fp_rate: float = 0.01,
+    ) -> None:
         self._signatures: list[Signature] = []
         self._md5_index: dict[str, Signature] = {}
         self._sha256_index: dict[str, Signature] = {}
@@ -135,8 +142,22 @@ class SignatureRepository:
             if sig.hex_pattern is not None:
                 self._patterns.append((sig.name, bytes.fromhex(sig.hex_pattern)))
 
+        self._bloom: Optional[BloomFilter] = None
+        self._bloom_fp_rate: float = bloom_fp_rate
+        if enable_bloom:
+            keys = list(self._md5_index.keys()) + list(self._sha256_index.keys())
+            self._bloom = BloomFilter(capacity=len(keys), fp_rate=bloom_fp_rate)
+            for k in keys:
+                self._bloom.add(k)
+
     @classmethod
-    def load(cls, path: str | Path) -> "SignatureRepository":
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        enable_bloom: bool = False,
+        bloom_fp_rate: float = 0.01,
+    ) -> "SignatureRepository":
         path = Path(path)
         with path.open("r", encoding="utf-8") as fh:
             try:
@@ -152,7 +173,29 @@ class SignatureRepository:
             )
 
         signatures = [_validate_entry(entry, idx) for idx, entry in enumerate(data)]
-        return cls(signatures)
+        return cls(
+            signatures,
+            enable_bloom=enable_bloom,
+            bloom_fp_rate=bloom_fp_rate,
+        )
+
+    @property
+    def bloom_enabled(self) -> bool:
+        return self._bloom is not None
+
+    @property
+    def bloom(self) -> Optional[BloomFilter]:
+        return self._bloom
+
+    def might_contain_hash(self, hex_digest: str) -> bool:
+        """Bloom pre-check for a hex digest.
+
+        Returns ``True`` when the bloom is disabled (no information),
+        a definitive ``False`` only when the bloom rules the key out.
+        """
+        if self._bloom is None:
+            return True
+        return hex_digest.lower() in self._bloom
 
     def lookup_md5(self, hex_digest: str) -> Optional[Signature]:
         return self._md5_index.get(hex_digest.lower())

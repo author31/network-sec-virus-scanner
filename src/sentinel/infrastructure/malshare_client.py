@@ -5,9 +5,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ..constants import DEFAULT_TIMEOUT_SECONDS
+
 MALSHARE_URL = "https://malshare.com/api.php"
 USER_AGENT = "sentinel-update/1.0"
-DEFAULT_TIMEOUT_SECONDS = 60
 
 
 class FetchError(RuntimeError):

@@ -191,8 +191,11 @@ uv run pytest tests/test_demo_tree_smoke.py
 - **Not a real antivirus.** Signature coverage is intentionally tiny (an
   EICAR canary plus whatever you import via Malshare). Heuristics are simple
   regex rules — easy to fool with light obfuscation.
-- **No archive unpacking.** Zip, tar, gzip and similar are scanned as opaque
-  blobs.
+- **Archive unpacking is optional and container-sandboxed (off by
+  default).** Pass `--unpack-archives` to extract zip / tar / gzip / bz2 /
+  xz / 7z / rar inside an isolated Docker container and scan their
+  contents. See [Archive unpacking](#archive-unpacking) below. Without the
+  flag, archives are scanned as opaque blobs (the historical behavior).
 - **No realtime / on-access scanning.** Sentinel is a one-shot CLI.
 - **Linux-only.** Tested on Linux + CPython 3.12; paths and permissions are
   not validated on other platforms.
@@ -201,14 +204,70 @@ uv run pytest tests/test_demo_tree_smoke.py
 
 Treat findings as hints, not verdicts.
 
+## Archive unpacking
+
+When `--unpack-archives` is set, each archive encountered by the directory
+walker is handed off to the *archive scan engine*. The engine launches a
+**fresh Docker container per archive layer**:
+
+- Archive mounted read-only at `/in/archive.bin`.
+- Extraction target is a `tmpfs` at `/work` with a size cap.
+- Signature DB + heuristic rules mounted read-only at `/rules`.
+- Container is launched with `--network=none`, a read-only root
+  filesystem, `--cap-drop=ALL`, `--security-opt=no-new-privileges`,
+  a non-root UID, and pid / memory / cpu caps.
+- Container is `--rm`'d unconditionally; the tmpfs disappears with it.
+
+Findings discovered inside an archive are folded into the parent report
+with a *provenance path* using `!` as the separator, matching the same
+convention as `jar` / `zipinfo` tooling:
+
+```
+2026-05-15T15:10:42Z | /var/scan/outer.zip!inner.tar!eicar.com | hash:sha256 | EICAR-Test-File | low
+```
+
+Skipped archives (cap exceeded, timeout, unsupported format, missing
+unpacker) are visible in the report with detection method
+`archive:skipped:<reason>` and severity `low`. They do **not** bump the
+infected or suspicious counts and do **not** change the exit code.
+
+Build the sandbox image once with the bundled `Dockerfile.archive-sandbox`:
+
+```bash
+docker build -f Dockerfile.archive-sandbox -t sentinel/archive-sandbox:latest .
+```
+
+Then opt in at scan time:
+
+```bash
+uv run sentinel scan tests/fixtures/archive_tree \
+    --unpack-archives \
+    --archive-depth 3 \
+    --archive-max-extracted-bytes $((512 * 1024 * 1024)) \
+    --archive-max-files 10000 \
+    --archive-timeout 60 \
+    --archive-image sentinel/archive-sandbox:latest
+```
+
+If Docker is unavailable and `--unpack-archives` was requested, Sentinel
+exits non-zero with a clear message (exit code `2`). For environments
+without Docker (test runners, dev loops), set
+`SENTINEL_ARCHIVE_BACKEND=local` to run the same extract-and-scan logic
+in-process — without sandbox isolation. **Do not enable the local backend
+on untrusted input.**
+
 ## Roadmap
 
 - **Bloom filter** in front of the hash repository to keep large signature
   DBs cheap to query.
 - **Parallel scan** across files (process pool) for big trees.
-- **Archive unpacking** (zip / tar / gzip) with a configurable depth cap.
 - **Streaming heuristic engine** so very large files aren't bounded by the
   in-memory read ceiling.
+
+## Shipped
+
+- **Archive unpacking** (zip / tar / gzip / bz2 / xz / 7z / rar) with a
+  configurable depth cap and per-archive Docker sandbox.
 
 ## Development
 

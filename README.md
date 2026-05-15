@@ -1,43 +1,221 @@
-# network-sec-virus-scanner
+# Sentinel
 
-Sentinel is a virus scanner that walks a directory tree, compares each file
-against a signature database (MD5, SHA-256, hex byte patterns) and a set of
-heuristic regex rules, and writes a log report.
+Sentinel is a small, educational virus scanner written in Python. It walks a
+directory tree and inspects every file with three complementary engines:
+
+- **Hash scan** — MD5 and SHA-256 lookup against a signature database.
+- **Byte-pattern scan** — hex-pattern (e.g. EICAR prefix) lookup against the
+  same database.
+- **Heuristic scan** — configurable regex rules that flag suspicious content
+  (PowerShell encoded commands, shell `eval(` markers, long base64 blobs, …).
+
+A scan emits a single log report listing every finding plus a summary block,
+and exits non-zero when anything is flagged so it can drive CI gates.
+
+**Scope.** Linux, Python 3.12+. Sentinel is a teaching / demo tool — it is
+not a production antivirus, has no realtime protection, no sandbox, and does
+not unpack archives. See [Limitations](#limitations).
+
+## Install
+
+Sentinel uses [uv](https://docs.astral.sh/uv/) for environment management.
+
+```bash
+git clone https://github.com/author31/network-sec-virus-scanner.git
+cd network-sec-virus-scanner
+uv sync                         # creates .venv and installs deps
+```
+
+A plain `pip` flow also works if you prefer:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .                # exposes the `sentinel` console script
+```
+
+Verify the install:
+
+```bash
+uv run sentinel scan --help
+```
+
+## Usage
+
+```
+sentinel scan DIR [--db PATH] [--rules PATH] [--report PATH]
+                  [--max-size BYTES] [-v|-vv]
+```
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--db` | `data/signatures.json` | Signature DB JSON path. |
+| `--rules` | `data/heuristic_rules.example.json` | Heuristic rules JSON path. |
+| `--report` | `./sentinel_report_<UTC>.log` | Report output file. |
+| `--max-size` | _(none)_ | Skip files larger than this many bytes. |
+| `-v` / `-vv` | _warn_ | Increase log verbosity (info / debug). |
+
+Exit codes: `0` clean, `1` infected or suspicious, `2` error.
+
+### EICAR demo (≈30 seconds)
+
+The repo ships with a tiny demo tree containing a real EICAR test string. It
+is the fastest way to confirm everything works.
+
+```bash
+uv sync
+uv run sentinel scan tests/fixtures/demo_tree --report /tmp/sentinel.log
+```
+
+Expected output:
+
+```
+Scanned 5 file(s): 2 infected, 1 suspicious, 2 clean. Report: /tmp/sentinel.log
+```
+
+> The `eicar.com` fixture contains the canonical EICAR test string. It is
+> harmless by design, but some endpoint security products may quarantine it
+> on checkout — restore from `git` if that happens.
+
+### More examples
+
+Scan a directory with custom rules and a fixed report path:
+
+```bash
+uv run sentinel scan ~/Downloads \
+    --db data/signatures.json \
+    --rules data/heuristic_rules.example.json \
+    --report ./reports/downloads.log -v
+```
+
+Skip very large files:
+
+```bash
+uv run sentinel scan /var/log --max-size $((50 * 1024 * 1024))
+```
+
+## Signature DB format
+
+`data/signatures.json` is a JSON array. Each entry must supply at least one of
+`md5`, `sha256`, or `hex_pattern`. Full schema, validation rules, and
+refresh-from-Malshare instructions live in
+[`data/README.md`](data/README.md).
+
+Minimal entry:
+
+```json
+{
+  "name": "EICAR-Test-File",
+  "threat_level": "low",
+  "md5": "44d88612fea8a8f36de82e1278abb02f",
+  "sha256": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+  "hex_pattern": "58354f2150254041505b345c505a58353428",
+  "description": "EICAR antivirus test string."
+}
+```
+
+`threat_level` ∈ `{low, medium, high, critical}`.
+
+## Heuristic rule format
+
+`data/heuristic_rules.example.json` is a JSON array of regex rules applied to
+each file's textual content (UTF-8, errors replaced). Schema:
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `name` | yes | Stable rule identifier shown in reports. |
+| `pattern` | yes | Python `re` regex. Use `(?i)` for case-insensitive. |
+| `severity` | yes | `low`, `medium`, `high`, or `critical`. |
+| `description` | no | Free-text explanation. |
+
+Example:
+
+```json
+{
+  "name": "powershell-encoded-command",
+  "pattern": "(?i)powershell(\\.exe)?\\s+-(?:e|en|enc|encodedcommand)\\b",
+  "severity": "high",
+  "description": "PowerShell launched with -EncodedCommand obfuscation."
+}
+```
+
+## Sample report
+
+Every finding is one pipe-delimited line followed by a summary block:
+
+```
+<UTC timestamp> | <absolute path> | <detection method> | <signature/rule> | <severity>
+```
+
+Real output from the bundled demo:
+
+```
+2026-05-15T14:29:05Z | .../demo_tree/top/sub1/deep/eicar.com       | hash:sha256                | EICAR-Test-File     | low
+2026-05-15T14:29:05Z | .../demo_tree/top/sub1/deep/eicar.com       | pattern:hex                | EICAR-Test-File     | low
+2026-05-15T14:29:05Z | .../demo_tree/top/sub2/suspicious.txt       | heuristic:shell-eval-marker| shell-eval-marker   | medium
+2026-05-15T14:29:05Z | .../demo_tree/top/sub2/with_pattern.bin     | pattern:hex                | EICAR-Test-File     | low
+
+=== Scan Summary ===
+Started:        2026-05-15T14:29:05Z
+Ended:          2026-05-15T14:29:05Z
+Duration:       0.001s
+Total scanned:  5
+Clean:          2
+Infected:       2
+Suspicious:     1
+=====================
+```
 
 ## Demo fixture: `tests/fixtures/demo_tree/`
-
-A small nested directory used for the end-to-end smoke test
-(`tests/test_demo_tree_smoke.py`). It exercises every scan engine plus the
-directory walker against the default `data/signatures.json` and
-`data/heuristic_rules.example.json`.
 
 ```
 tests/fixtures/demo_tree/
 └── top/
-    ├── clean1.txt                  # clean — plain text, no signature/rule hits
+    ├── clean1.txt                  # clean — plain text
     ├── sub1/
-    │   ├── clean2.bin              # clean — small binary, no hits
+    │   ├── clean2.bin              # clean — small binary
     │   └── deep/
-    │       └── eicar.com           # infected — full EICAR test string
-    │                               # (hash + hex-pattern hits)
+    │       └── eicar.com           # infected — full EICAR (hash + hex hits)
     └── sub2/
         ├── with_pattern.bin        # infected — EICAR hex prefix embedded
-        │                           # in null padding (pattern-only hit)
-        └── suspicious.txt          # suspicious — triggers the
-                                    # `shell-eval-marker` heuristic
+        └── suspicious.txt          # suspicious — `shell-eval-marker` hit
 ```
 
-The fixture is deliberately small so it can be committed and replayed
-deterministically in CI. `eicar.com` contains the real EICAR test string
-(harmless by design but recognised by every mainstream antivirus); some
-endpoint security tools may quarantine it on checkout.
+End-to-end smoke test:
 
-### Running the smoke test
-
-```
-PYTHONPATH= uv run pytest tests/test_demo_tree_smoke.py
+```bash
+uv run pytest tests/test_demo_tree_smoke.py
 ```
 
-Expected outcome: exit code `1` (`EXIT_INFECTED`), report flags
-`eicar.com`, `with_pattern.bin`, and `suspicious.txt`, and reports the two
-clean files as clean.
+## Limitations
+
+- **Not a real antivirus.** Signature coverage is intentionally tiny (an
+  EICAR canary plus whatever you import via Malshare). Heuristics are simple
+  regex rules — easy to fool with light obfuscation.
+- **No archive unpacking.** Zip, tar, gzip and similar are scanned as opaque
+  blobs.
+- **No realtime / on-access scanning.** Sentinel is a one-shot CLI.
+- **Linux-only.** Tested on Linux + CPython 3.12; paths and permissions are
+  not validated on other platforms.
+- **Whole-file regex.** Heuristic content is read up to a bounded ceiling per
+  file; very large files may have content past the ceiling skipped.
+
+Treat findings as hints, not verdicts.
+
+## Roadmap
+
+- **Bloom filter** in front of the hash repository to keep large signature
+  DBs cheap to query.
+- **Parallel scan** across files (process pool) for big trees.
+- **Archive unpacking** (zip / tar / gzip) with a configurable depth cap.
+- **Streaming heuristic engine** so very large files aren't bounded by the
+  in-memory read ceiling.
+
+## Development
+
+```bash
+uv sync                  # install dev deps (pytest)
+uv run pytest            # run the full suite
+uv run pytest tests/test_demo_tree_smoke.py   # just the smoke test
+```
+
+See [`CLAUDE.md`](CLAUDE.md) for project conventions (uv only, DDD layout).

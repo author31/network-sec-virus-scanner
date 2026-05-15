@@ -58,24 +58,31 @@ def scan_file(
     """
     md5_hex, sha256_hex = compute_hashes(path, chunk_size=chunk_size)
 
-    sig = repository.lookup_sha256(sha256_hex)
-    if sig is not None:
-        return HashScanResult(
-            path=Path(path),
-            signature=sig,
-            detection_method=DETECTION_METHOD_SHA256,
-            md5=md5_hex,
-            sha256=sha256_hex,
-        )
+    sha_candidate = repository.might_contain_hash(sha256_hex)
+    md5_candidate = repository.might_contain_hash(md5_hex)
+    if not sha_candidate and not md5_candidate:
+        return None
 
-    sig = repository.lookup_md5(md5_hex)
-    if sig is not None:
-        return HashScanResult(
-            path=Path(path),
-            signature=sig,
-            detection_method=DETECTION_METHOD_MD5,
-            md5=md5_hex,
-            sha256=sha256_hex,
-        )
+    if sha_candidate:
+        sig = repository.lookup_sha256(sha256_hex)
+        if sig is not None:
+            return HashScanResult(
+                path=Path(path),
+                signature=sig,
+                detection_method=DETECTION_METHOD_SHA256,
+                md5=md5_hex,
+                sha256=sha256_hex,
+            )
+
+    if md5_candidate:
+        sig = repository.lookup_md5(md5_hex)
+        if sig is not None:
+            return HashScanResult(
+                path=Path(path),
+                signature=sig,
+                detection_method=DETECTION_METHOD_MD5,
+                md5=md5_hex,
+                sha256=sha256_hex,
+            )
 
     return None

@@ -176,6 +176,69 @@ def test_scan_file_handles_binary_without_error(tmp_path: Path) -> None:
     assert scan_file(f, repo) is None
 
 
+def test_scan_file_with_bloom_detects_known_match(tmp_path: Path) -> None:
+    db = tmp_path / "signatures.json"
+    db.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "EICAR-Test-File",
+                    "threat_level": "low",
+                    "md5": EICAR_MD5,
+                    "sha256": EICAR_SHA256,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    repo = SignatureRepository.load(db, enable_bloom=True)
+    f = _write(tmp_path / "eicar.com", EICAR_BYTES)
+    result = scan_file(f, repo)
+    assert result is not None
+    assert result.detection_method == DETECTION_METHOD_SHA256
+
+
+def test_scan_file_with_bloom_clean_file_returns_none(tmp_path: Path) -> None:
+    db = tmp_path / "signatures.json"
+    db.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "EICAR-Test-File",
+                    "threat_level": "low",
+                    "md5": EICAR_MD5,
+                    "sha256": EICAR_SHA256,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    repo = SignatureRepository.load(db, enable_bloom=True)
+    f = _write(tmp_path / "clean.txt", b"definitely benign content")
+    assert scan_file(f, repo) is None
+
+
+def test_scan_file_with_bloom_zero_false_negatives_synthetic(tmp_path: Path) -> None:
+    """For 500 known md5s, every matching file is still detected with bloom on."""
+    entries = []
+    payloads: list[tuple[bytes, str]] = []
+    for i in range(500):
+        payload = f"payload-{i}".encode()
+        md5 = hashlib.md5(payload).hexdigest()
+        entries.append({"name": f"sig-{i}", "threat_level": "low", "md5": md5})
+        payloads.append((payload, md5))
+
+    db = tmp_path / "signatures.json"
+    db.write_text(json.dumps(entries), encoding="utf-8")
+    repo = SignatureRepository.load(db, enable_bloom=True, bloom_fp_rate=0.01)
+
+    for idx, (payload, md5) in enumerate(payloads):
+        f = _write(tmp_path / f"f-{idx}", payload)
+        result = scan_file(f, repo)
+        assert result is not None, f"missed payload-{idx}"
+        assert result.md5 == md5
+
+
 def test_scan_file_accepts_str_path(tmp_path: Path) -> None:
     repo = _make_repo(
         tmp_path,

@@ -306,6 +306,86 @@ def test_scan_heuristic_match_is_non_clean(
     assert "eval-call" in text
 
 
+def test_scan_with_bloom_flag_detects_eicar(
+    tmp_path: Path,
+    signature_db: Path,
+    rules_db: Path,
+) -> None:
+    target = _scan_target(tmp_path)
+    (target / "eicar.com").write_bytes(EICAR_BYTES)
+    report = tmp_path / "report.log"
+
+    code = main(
+        [
+            "scan",
+            str(target),
+            "--db",
+            str(signature_db),
+            "--rules",
+            str(rules_db),
+            "--report",
+            str(report),
+            "--bloom",
+        ]
+    )
+
+    assert code == EXIT_INFECTED
+    text = report.read_text(encoding="utf-8")
+    assert "EICAR-Test-File" in text
+
+
+def test_scan_with_bloom_clean_dir_exits_clean(
+    tmp_path: Path,
+    signature_db: Path,
+    rules_db: Path,
+) -> None:
+    target = _scan_target(tmp_path)
+    (target / "ok.txt").write_bytes(b"clean content")
+    report = tmp_path / "report.log"
+
+    code = main(
+        [
+            "scan",
+            str(target),
+            "--db",
+            str(signature_db),
+            "--rules",
+            str(rules_db),
+            "--report",
+            str(report),
+            "--bloom",
+            "--bloom-fp-rate",
+            "0.001",
+        ]
+    )
+    assert code == EXIT_CLEAN
+
+
+def test_scan_invalid_bloom_fp_rate_exits_error(
+    tmp_path: Path,
+    signature_db: Path,
+    rules_db: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = _scan_target(tmp_path)
+    code = main(
+        [
+            "scan",
+            str(target),
+            "--db",
+            str(signature_db),
+            "--rules",
+            str(rules_db),
+            "--bloom",
+            "--bloom-fp-rate",
+            "0",
+        ]
+    )
+    assert code == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "bloom-fp-rate" in err
+
+
 def test_scan_default_report_path_when_omitted(
     tmp_path: Path,
     signature_db: Path,

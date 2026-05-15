@@ -1,0 +1,28 @@
+# Sentinel — daily Malshare signature DB refresh
+#
+# Install: cp this file into /etc/cron.d/sentinel-fetch-malshare and reload
+# cron (`systemctl reload cron` on Debian/Ubuntu). The file lists a single
+# entry; cron will reread it on the next minute boundary.
+#
+# Schedule: 03:17 UTC daily — a few minutes after the Malshare 24h feed
+# window rolls over so we don't hit an empty list.
+#
+# Secrets: MALSHARE_API_KEY MUST come from /etc/sentinel/env (mode 0600,
+# owned by the service user). Do NOT inline the key in this file. Example
+# /etc/sentinel/env contents (kept out of the repo):
+#
+#     MALSHARE_API_KEY=...rotated-secret...
+#
+# Output:  /var/log/sentinel/fetch-malshare.log  (rotate via logrotate)
+# Timeout: 5 minutes, enforced by /usr/bin/timeout. Exits non-zero on
+#          fetch/parse/write failure so the system surfaces the alert via
+#          the standard cron MAILTO / log sink.
+#
+# Edit SENTINEL_HOME to match your install path before deployment.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=oncall@example.com
+SENTINEL_HOME=/opt/sentinel
+
+17 03 * * *  sentinel  set -a; . /etc/sentinel/env; set +a; /usr/bin/timeout 300 /opt/sentinel/.venv/bin/python /opt/sentinel/scripts/fetch_malshare.py --output /opt/sentinel/data/signatures.json >> /var/log/sentinel/fetch-malshare.log 2>&1

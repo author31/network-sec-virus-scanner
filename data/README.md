@@ -71,6 +71,17 @@ added.
 
 ### Refresh cadence
 
-Production deployments run the script on a daily cron — see the deploy
-configuration delivered under sibling issue **NET-29** for the schedule and
-secret wiring. This module only owns the dataset + script.
+Production deployments run the script **once per day at `17 03 * * *` UTC**
+(a few minutes after the Malshare 24h feed window rolls over). The schedule
+is documented and enforced in three interchangeable deployment shapes:
+
+- System cron: [`deploy/cron/fetch-malshare.cron`](../deploy/cron/fetch-malshare.cron)
+- Kubernetes `CronJob`: [`deploy/k8s/fetch-malshare-cronjob.yaml`](../deploy/k8s/fetch-malshare-cronjob.yaml)
+- In-process daemon: `sentinel daemon start` (see
+  [`deploy/README.md`](../deploy/README.md))
+
+All three are configured to the same `17 03 * * *` UTC schedule. Override
+the daemon via `--schedule "<cron>"` or `$SENTINEL_SCHEDULE`.
+
+This module only owns the dataset + script; the deploy artifacts live under
+`deploy/`.

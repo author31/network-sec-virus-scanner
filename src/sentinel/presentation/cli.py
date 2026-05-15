@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,14 +11,21 @@ from typing import Optional, Sequence
 from ..application import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_MAX_BYTES,
+    DEFAULT_SCHEDULE,
+    DaemonConfig,
+    ENV_API_KEY,
+    ENV_SCHEDULE,
     HashScanResult,
     HeuristicMatch,
     PatternScanResult,
+    detach,
+    resolve_schedule,
+    run_daemon,
     scan_file,
     scan_file_heuristic,
     scan_file_patterns,
 )
-from ..infrastructure import walk_files
+from ..infrastructure import CronError, walk_files
 from ..repository import (
     HeuristicRuleRepository,
     HeuristicRuleValidationError,
@@ -93,6 +101,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target false-positive rate for the Bloom filter (default: 0.01).",
     )
     scan.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase log verbosity (-v info, -vv debug).",
+    )
+
+    daemon = sub.add_parser(
+        "daemon",
+        help="Run sentinel as a long-lived background service.",
+        description=(
+            "Long-running service that triggers signature DB refreshes on a "
+            "cron schedule. Use the 'start' subcommand."
+        ),
+    )
+    daemon_sub = daemon.add_subparsers(
+        dest="daemon_command", required=True, metavar="DAEMON_COMMAND"
+    )
+    daemon_start = daemon_sub.add_parser(
+        "start",
+        help="Start the daemon scheduler in the foreground.",
+        description=(
+            "Start the in-process Malshare refresh scheduler. By default the "
+            "scheduler runs in the foreground so it integrates with systemd "
+            "and container supervisors."
+        ),
+    )
+    daemon_start.add_argument(
+        "--schedule",
+        default=None,
+        help=(
+            "Cron expression (5 fields, UTC). Falls back to "
+            f"${ENV_SCHEDULE} then '{DEFAULT_SCHEDULE}'."
+        ),
+    )
+    daemon_start.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Path to signature DB JSON (default: data/signatures.json).",
+    )
+    daemon_start.add_argument(
+        "--run-now",
+        action="store_true",
+        help="Perform an immediate fetch on startup before the first tick.",
+    )
+    daemon_start.add_argument(
+        "--detach",
+        action="store_true",
+        help="Daemonise (double-fork). Default is foreground.",
+    )
+    daemon_start.add_argument(
+        "--pidfile",
+        type=Path,
+        default=None,
+        help="Write the daemon PID to this path; remove on shutdown.",
+    )
+    daemon_start.add_argument(
+        "--threat-level",
+        default="medium",
+        choices=("low", "medium", "high", "critical"),
+        help="Threat level applied to imported Malshare entries.",
+    )
+    daemon_start.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="HTTP timeout per fetch in seconds.",
+    )
+    daemon_start.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -253,6 +331,35 @@ def run_scan(args: argparse.Namespace) -> int:
     return EXIT_CLEAN
 
 
+def run_daemon_start(args: argparse.Namespace) -> int:
+    try:
+        schedule = resolve_schedule(args.schedule)
+    except CronError as exc:
+        _err(f"invalid --schedule: {exc}")
+        return EXIT_ERROR
+
+    api_key = os.environ.get(ENV_API_KEY, "")
+    if not api_key:
+        _err(f"{ENV_API_KEY} is not set")
+        return EXIT_ERROR
+
+    output = args.output if args.output is not None else Path("data/signatures.json")
+    config = DaemonConfig(
+        api_key=api_key,
+        schedule=schedule,
+        output=output,
+        run_now=args.run_now,
+        pidfile=args.pidfile,
+        threat_level=args.threat_level,
+        timeout=args.timeout,
+    )
+
+    if args.detach:
+        detach()
+
+    return run_daemon(config)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -260,6 +367,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "scan":
         return run_scan(args)
+    if args.command == "daemon":
+        if args.daemon_command == "start":
+            return run_daemon_start(args)
+        parser.error(f"unknown daemon command: {args.daemon_command}")
+        return EXIT_ERROR
 
     parser.error(f"unknown command: {args.command}")
     return EXIT_ERROR

@@ -78,6 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip files larger than BYTES.",
     )
     scan.add_argument(
+        "--bloom",
+        action="store_true",
+        help=(
+            "Enable Bloom-filter pre-check before hash-map lookup. "
+            "Off by default."
+        ),
+    )
+    scan.add_argument(
+        "--bloom-fp-rate",
+        type=float,
+        default=0.01,
+        metavar="RATE",
+        help="Target false-positive rate for the Bloom filter (default: 0.01).",
+    )
+    scan.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -104,10 +119,19 @@ def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
 
 
-def _load_signatures(path: Path) -> SignatureRepository:
+def _load_signatures(
+    path: Path,
+    *,
+    enable_bloom: bool = False,
+    bloom_fp_rate: float = 0.01,
+) -> SignatureRepository:
     if not path.exists():
         raise FileNotFoundError(f"signature DB not found: {path}")
-    return SignatureRepository.load(path)
+    return SignatureRepository.load(
+        path,
+        enable_bloom=enable_bloom,
+        bloom_fp_rate=bloom_fp_rate,
+    )
 
 
 def _load_rules(path: Path) -> HeuristicRuleRepository:
@@ -162,9 +186,16 @@ def run_scan(args: argparse.Namespace) -> int:
     if args.max_size is not None and args.max_size < 0:
         _err("--max-size must be non-negative")
         return EXIT_ERROR
+    if not (0.0 < args.bloom_fp_rate < 1.0):
+        _err("--bloom-fp-rate must be in (0, 1)")
+        return EXIT_ERROR
 
     try:
-        signatures = _load_signatures(args.db)
+        signatures = _load_signatures(
+            args.db,
+            enable_bloom=args.bloom,
+            bloom_fp_rate=args.bloom_fp_rate,
+        )
     except FileNotFoundError as exc:
         _err(str(exc))
         return EXIT_ERROR

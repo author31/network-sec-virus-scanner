@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,12 +14,14 @@ from ..application import (
     HashScanResult,
     HeuristicMatch,
     PatternScanResult,
+    refresh,
     scan_file,
     scan_file_heuristic,
     scan_file_patterns,
 )
-from ..infrastructure import walk_files
+from ..infrastructure import DEFAULT_TIMEOUT_SECONDS, FetchError, walk_files
 from ..repository import (
+    DEFAULT_THREAT_LEVEL,
     HeuristicRuleRepository,
     HeuristicRuleValidationError,
     SignatureRepository,
@@ -93,6 +96,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target false-positive rate for the Bloom filter (default: 0.01).",
     )
     scan.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase log verbosity (-v info, -vv debug).",
+    )
+
+    update = sub.add_parser(
+        "update",
+        help="Fetch the Malshare hash list and merge it into the signature DB.",
+        description=(
+            "Fetch malware hashes from Malshare's getlist endpoint and merge "
+            "them into the local signature DB. Requires the MALSHARE_API_KEY "
+            "environment variable."
+        ),
+    )
+    update.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"Signature DB JSON path (default: {DEFAULT_DB_PATH}).",
+    )
+    update.add_argument(
+        "--threat-level",
+        default=DEFAULT_THREAT_LEVEL,
+        choices=("low", "medium", "high", "critical"),
+        help="Threat level applied to imported Malshare entries.",
+    )
+    update.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=f"HTTP timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).",
+    )
+    update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and validate without writing the output file.",
+    )
+    update.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -253,6 +297,41 @@ def run_scan(args: argparse.Namespace) -> int:
     return EXIT_CLEAN
 
 
+def run_update(args: argparse.Namespace) -> int:
+    api_key = os.environ.get("MALSHARE_API_KEY", "")
+    if not api_key:
+        _err("MALSHARE_API_KEY is not set")
+        return EXIT_ERROR
+
+    if args.timeout <= 0:
+        _err("--timeout must be positive")
+        return EXIT_ERROR
+
+    try:
+        stats = refresh(
+            output=args.db,
+            api_key=api_key,
+            threat_level=args.threat_level,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
+        )
+    except FetchError as exc:
+        _err(f"update failed: {exc}")
+        return EXIT_ERROR
+    except SignatureValidationError as exc:
+        _err(f"merged signature DB failed validation: {exc}")
+        return EXIT_ERROR
+
+    prefix = "Signature DB validated (dry-run)" if args.dry_run else (
+        f"Signature DB updated -> {args.db}"
+    )
+    print(
+        f"{prefix}: added={stats.added} deduped={stats.skipped_duplicate} "
+        f"invalid={stats.skipped_invalid} total={stats.total}"
+    )
+    return EXIT_CLEAN
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -260,6 +339,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "scan":
         return run_scan(args)
+    if args.command == "update":
+        return run_update(args)
 
     parser.error(f"unknown command: {args.command}")
     return EXIT_ERROR

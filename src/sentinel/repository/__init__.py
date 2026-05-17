@@ -1,3 +1,5 @@
+from .file_index_entry import FileIndexEntry
+from .file_index_repository import FileIndexRepository, FileIndexValidationError
 from .heuristic_rule import HeuristicRule
 from .heuristic_rule_repository import (
     HeuristicRuleRepository,
@@ -16,6 +18,9 @@ from .signature_repository import SignatureRepository, SignatureValidationError
 
 __all__ = [
     "DEFAULT_THREAT_LEVEL",
+    "FileIndexEntry",
+    "FileIndexRepository",
+    "FileIndexValidationError",
     "HeuristicRule",
     "HeuristicRuleRepository",
     "HeuristicRuleValidationError",

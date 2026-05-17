@@ -407,5 +407,5 @@ def test_scan_default_report_path_when_omitted(
         ]
     )
     assert code == EXIT_CLEAN
-    reports = list(tmp_path.glob("sentinel_report_*.log"))
+    reports = list((tmp_path / "logs").glob("sentinel_report_*.log"))
     assert len(reports) == 1

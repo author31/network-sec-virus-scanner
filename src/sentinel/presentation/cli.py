@@ -22,6 +22,7 @@ from ..application import (
     refresh,
     scan_file,
     scan_file_heuristic,
+    scan_file_indexed,
     scan_file_patterns,
 )
 from ..infrastructure import (
@@ -39,6 +40,8 @@ from ..infrastructure import (
 )
 from ..repository import (
     DEFAULT_THREAT_LEVEL,
+    FileIndexRepository,
+    FileIndexValidationError,
     HeuristicRuleRepository,
     HeuristicRuleValidationError,
     SignatureRepository,
@@ -52,6 +55,7 @@ EXIT_ERROR = 2
 
 DEFAULT_DB_PATH = Path("data/signatures.json")
 DEFAULT_RULES_PATH = Path("data/heuristic_rules.example.json")
+DEFAULT_INDEX_PATH = Path("data/sentinel_index.json")
 
 BACKEND_ENV_VAR = "SENTINEL_ARCHIVE_BACKEND"
 BACKEND_DOCKER = "docker"
@@ -92,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--report",
         type=Path,
         default=None,
-        help="Report output path (default: sentinel_report_<UTC>.log in CWD).",
+        help="Report output path (default: logs/sentinel_report_<UTC>.log in CWD).",
     )
     scan.add_argument(
         "--max-size",
@@ -115,6 +119,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         metavar="RATE",
         help="Target false-positive rate for the Bloom filter (default: 0.01).",
+    )
+    scan.add_argument(
+        "--use-index",
+        action="store_true",
+        help=(
+            "Enable index-based scan: maintain a local file index "
+            "(path -> size, mtime, cached hashes) and reuse cached hashes "
+            "for unchanged files. Hash scan only — byte-pattern and "
+            "heuristic scans are skipped in this mode."
+        ),
+    )
+    scan.add_argument(
+        "--index-file",
+        type=Path,
+        default=DEFAULT_INDEX_PATH,
+        help=f"Local file-index JSON path (default: {DEFAULT_INDEX_PATH}).",
     )
     scan.add_argument(
         "--unpack-archives",
@@ -338,11 +358,13 @@ def _scan_directory(
     *,
     max_size: Optional[int],
     archive_engine: Optional[ArchiveScanEngine],
+    file_index: Optional[FileIndexRepository] = None,
 ) -> tuple[
     list[HashScanResult],
     list[PatternScanResult],
     list[HeuristicMatch],
     list[ArchiveFinding],
+    int,
     int,
     int,
     int,
@@ -354,6 +376,7 @@ def _scan_directory(
     total = 0
     archives_unpacked = 0
     archives_skipped = 0
+    cache_hits = 0
 
     for path in walk_files(directory, max_file_size=max_size):
         total += 1
@@ -363,6 +386,16 @@ def _scan_directory(
                 archive_findings.extend(outcome.findings)
                 archives_unpacked += outcome.archives_unpacked
                 archives_skipped += outcome.archives_skipped
+                continue
+
+            if file_index is not None:
+                h, cache_hit = scan_file_indexed(
+                    path, signatures, file_index, chunk_size=DEFAULT_CHUNK_SIZE
+                )
+                if h is not None:
+                    hash_hits.append(h)
+                if cache_hit:
+                    cache_hits += 1
                 continue
 
             h = scan_file(path, signatures, chunk_size=DEFAULT_CHUNK_SIZE)
@@ -385,6 +418,7 @@ def _scan_directory(
         total,
         archives_unpacked,
         archives_skipped,
+        cache_hits,
     )
 
 
@@ -444,6 +478,14 @@ def run_scan(args: argparse.Namespace) -> int:
         _err(str(exc))
         return EXIT_ERROR
 
+    file_index: Optional[FileIndexRepository] = None
+    if args.use_index:
+        try:
+            file_index = FileIndexRepository.load(args.index_file)
+        except FileIndexValidationError as exc:
+            _err(f"invalid file index: {exc}")
+            return EXIT_ERROR
+
     started_at = datetime.now(tz=timezone.utc)
     try:
         (
@@ -454,17 +496,26 @@ def run_scan(args: argparse.Namespace) -> int:
             total,
             archives_unpacked,
             archives_skipped,
+            cache_hits,
         ) = _scan_directory(
             directory,
             signatures,
             rules,
             max_size=args.max_size,
             archive_engine=archive_engine,
+            file_index=file_index,
         )
     except OSError as exc:
         _err(f"scan failed: {exc}")
         return EXIT_ERROR
     ended_at = datetime.now(tz=timezone.utc)
+
+    if file_index is not None:
+        try:
+            file_index.save(args.index_file)
+        except OSError as exc:
+            _err(f"failed to write index {args.index_file}: {exc}")
+            return EXIT_ERROR
 
     report = build_report(
         hash_results=hash_hits,
@@ -487,11 +538,14 @@ def run_scan(args: argparse.Namespace) -> int:
         _err(f"failed to write report {report_path}: {exc}")
         return EXIT_ERROR
 
+    cache_suffix = (
+        f" (cache hits: {cache_hits})" if args.use_index else ""
+    )
     print(
         f"Scanned {report.total_files} file(s): "
         f"{report.infected_count} infected, "
         f"{report.suspicious_count} suspicious, "
-        f"{report.clean_count} clean. "
+        f"{report.clean_count} clean.{cache_suffix} "
         f"Report: {written}"
     )
 

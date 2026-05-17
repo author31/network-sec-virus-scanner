@@ -45,19 +45,17 @@ def compute_hashes(
     return md5.hexdigest(), sha256.hexdigest()
 
 
-def scan_file(
+def lookup_hashes(
     path: str | os.PathLike[str],
+    md5_hex: str,
+    sha256_hex: str,
     repository: SignatureRepository,
-    *,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> Optional[HashScanResult]:
-    """Hash ``path`` and look it up in ``repository``.
+    """Look ``md5_hex``/``sha256_hex`` up in ``repository``.
 
     SHA-256 is checked before MD5 — the stronger digest wins on a tie.
     Returns ``None`` if neither digest matches.
     """
-    md5_hex, sha256_hex = compute_hashes(path, chunk_size=chunk_size)
-
     sha_candidate = repository.might_contain_hash(sha256_hex)
     md5_candidate = repository.might_contain_hash(md5_hex)
     if not sha_candidate and not md5_candidate:
@@ -86,3 +84,14 @@ def scan_file(
             )
 
     return None
+
+
+def scan_file(
+    path: str | os.PathLike[str],
+    repository: SignatureRepository,
+    *,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> Optional[HashScanResult]:
+    """Hash ``path`` and look it up in ``repository``."""
+    md5_hex, sha256_hex = compute_hashes(path, chunk_size=chunk_size)
+    return lookup_hashes(path, md5_hex, sha256_hex, repository)

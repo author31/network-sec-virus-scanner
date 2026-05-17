@@ -16,6 +16,7 @@ from ..repository import ThreatLevel
 
 REPORT_FILENAME_PREFIX = "sentinel_report_"
 REPORT_FILENAME_SUFFIX = ".log"
+DEFAULT_LOG_DIRNAME = "logs"
 _TIMESTAMP_FILENAME_FMT = "%Y%m%dT%H%M%SZ"
 _TIMESTAMP_FIELD_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -140,7 +141,7 @@ def default_report_path(
     *, now: Optional[datetime] = None, base_dir: Optional[Path] = None
 ) -> Path:
     stamp = _now(now).strftime(_TIMESTAMP_FILENAME_FMT)
-    directory = base_dir if base_dir is not None else Path.cwd()
+    directory = base_dir if base_dir is not None else Path.cwd() / DEFAULT_LOG_DIRNAME
     return directory / f"{REPORT_FILENAME_PREFIX}{stamp}{REPORT_FILENAME_SUFFIX}"
 
 

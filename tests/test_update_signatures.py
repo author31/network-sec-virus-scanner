@@ -1,23 +1,17 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPTS = _REPO_ROOT / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
-import fetch_malshare  # noqa: E402
-from fetch_malshare import (  # noqa: E402
-    FetchError,
+from sentinel.application import refresh
+from sentinel.infrastructure import FetchError, fetch_getlist
+from sentinel.repository import (
+    SignatureRepository,
     merge_entries,
     normalize_entry,
-    refresh,
 )
 
 
@@ -216,7 +210,7 @@ def test_refresh_skips_records_without_hashes(tmp_path: Path):
 def test_refresh_requires_api_key(tmp_path: Path):
     db = _seed_db(tmp_path, [EICAR_ENTRY])
     with pytest.raises(FetchError, match="MALSHARE_API_KEY"):
-        refresh(output=db, api_key="", fetcher=fetch_malshare.fetch_getlist)
+        refresh(output=db, api_key="", fetcher=fetch_getlist)
 
 
 def test_refresh_creates_db_when_missing(tmp_path: Path):
@@ -247,8 +241,6 @@ def test_refresh_propagates_fetch_failures(tmp_path: Path):
 def test_refresh_loaded_through_signature_repository(tmp_path: Path):
     """End-to-end: writer output must parse via SignatureRepository.load."""
 
-    from sentinel.repository import SignatureRepository
-
     db = _seed_db(tmp_path, [EICAR_ENTRY])
 
     def fake_fetcher(api_key: str, *, timeout: int):
@@ -260,7 +252,6 @@ def test_refresh_loaded_through_signature_repository(tmp_path: Path):
     )
     repo = SignatureRepository.load(db)
     assert len(repo) == 3
-    # EICAR canary still resolves end-to-end
     eicar = repo.lookup_md5(EICAR_ENTRY["md5"])
     assert eicar is not None
     assert eicar.name == "EICAR-Test-File"

@@ -18,6 +18,7 @@ from .heuristic_scan_engine import (
     HeuristicMatch,
     scan_file_heuristic,
 )
+from .update_signatures import refresh
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
@@ -31,6 +32,7 @@ __all__ = [
     "HeuristicMatch",
     "PatternScanResult",
     "compute_hashes",
+    "refresh",
     "scan_file",
     "scan_file_heuristic",
     "scan_file_patterns",

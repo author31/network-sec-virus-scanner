@@ -9,17 +9,34 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ..application import (
+    DEFAULT_ARCHIVE_DEPTH,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_MAX_BYTES,
+    ArchiveFinding,
+    ArchiveScanEngine,
+    DockerArchiveBackend,
     HashScanResult,
     HeuristicMatch,
+    LocalArchiveBackend,
     PatternScanResult,
     refresh,
     scan_file,
     scan_file_heuristic,
     scan_file_patterns,
 )
-from ..infrastructure import DEFAULT_TIMEOUT_SECONDS, FetchError, walk_files
+from ..infrastructure import (
+    DEFAULT_IMAGE,
+    DEFAULT_MAX_EXTRACTED_BYTES,
+    DEFAULT_MAX_FILES,
+    DEFAULT_TIMEOUT_SECONDS,
+    DockerSandboxError,
+    SandboxLimits,
+    detect_archive_type,
+    ensure_sandbox_image,
+    is_docker_available,
+    walk_files,
+    FetchError
+)
 from ..repository import (
     DEFAULT_THREAT_LEVEL,
     HeuristicRuleRepository,
@@ -35,6 +52,10 @@ EXIT_ERROR = 2
 
 DEFAULT_DB_PATH = Path("data/signatures.json")
 DEFAULT_RULES_PATH = Path("data/heuristic_rules.example.json")
+
+BACKEND_ENV_VAR = "SENTINEL_ARCHIVE_BACKEND"
+BACKEND_DOCKER = "docker"
+BACKEND_LOCAL = "local"
 
 logger = logging.getLogger("sentinel")
 
@@ -94,6 +115,72 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         metavar="RATE",
         help="Target false-positive rate for the Bloom filter (default: 0.01).",
+    )
+    scan.add_argument(
+        "--unpack-archives",
+        action="store_true",
+        help=(
+            "Unpack archives (zip/tar/gzip/7z/rar) in an isolated Docker "
+            "sandbox and scan their contents. Off by default."
+        ),
+    )
+    scan.add_argument(
+        "--archive-depth",
+        type=int,
+        default=DEFAULT_ARCHIVE_DEPTH,
+        metavar="N",
+        help=(
+            "Maximum archive-nesting depth to recurse "
+            f"(default: {DEFAULT_ARCHIVE_DEPTH})."
+        ),
+    )
+    scan.add_argument(
+        "--archive-max-extracted-bytes",
+        type=int,
+        default=DEFAULT_MAX_EXTRACTED_BYTES,
+        metavar="BYTES",
+        help=(
+            "Maximum cumulative extracted bytes per archive "
+            f"(default: {DEFAULT_MAX_EXTRACTED_BYTES})."
+        ),
+    )
+    scan.add_argument(
+        "--archive-max-files",
+        type=int,
+        default=DEFAULT_MAX_FILES,
+        metavar="N",
+        help=(
+            "Maximum number of files extracted per archive "
+            f"(default: {DEFAULT_MAX_FILES})."
+        ),
+    )
+    scan.add_argument(
+        "--archive-timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Per-archive sandbox timeout in seconds "
+            f"(default: {DEFAULT_TIMEOUT_SECONDS})."
+        ),
+    )
+    scan.add_argument(
+        "--archive-image",
+        default=DEFAULT_IMAGE,
+        metavar="IMAGE",
+        help=(
+            "Docker image used for the archive sandbox "
+            f"(default: {DEFAULT_IMAGE})."
+        ),
+    )
+    scan.add_argument(
+        "--no-build-sandbox",
+        action="store_true",
+        help=(
+            "Do not auto-build the sandbox image if it is missing locally. "
+            "By default, the image is built from Dockerfile.archive-sandbox "
+            "when not present."
+        ),
     )
     scan.add_argument(
         "-v",
@@ -184,26 +271,100 @@ def _load_rules(path: Path) -> HeuristicRuleRepository:
     return HeuristicRuleRepository.load(path)
 
 
+def _build_archive_engine(
+    args: argparse.Namespace,
+    signatures: SignatureRepository,
+    rules: HeuristicRuleRepository,
+) -> Optional[ArchiveScanEngine]:
+    """Construct the archive engine when ``--unpack-archives`` is set.
+
+    Returns ``None`` if archive scanning is disabled. Raises
+    :class:`RuntimeError` when Docker is required but unavailable.
+    """
+    if not args.unpack_archives:
+        return None
+
+    limits = SandboxLimits(
+        timeout_seconds=args.archive_timeout,
+        max_extracted_bytes=args.archive_max_extracted_bytes,
+        max_files=args.archive_max_files,
+    )
+
+    backend_choice = os.environ.get(BACKEND_ENV_VAR, BACKEND_DOCKER).lower()
+    if backend_choice == BACKEND_LOCAL:
+        backend = LocalArchiveBackend(
+            signatures=signatures,
+            rules=rules,
+            max_extracted_bytes=args.archive_max_extracted_bytes,
+            max_files=args.archive_max_files,
+        )
+    else:
+        if not is_docker_available():
+            raise RuntimeError(
+                "--unpack-archives requires Docker on PATH (or set "
+                f"{BACKEND_ENV_VAR}={BACKEND_LOCAL} for an in-process fallback)"
+            )
+        if not args.no_build_sandbox:
+            try:
+                ensure_sandbox_image(image=args.archive_image)
+            except DockerSandboxError as exc:
+                raise RuntimeError(f"sandbox image unavailable: {exc}") from exc
+        rules_dir = _common_rules_dir(args.db, args.rules)
+        backend = DockerArchiveBackend(
+            image=args.archive_image,
+            rules_dir=rules_dir,
+            limits=limits,
+        )
+
+    return ArchiveScanEngine(backend, max_depth=args.archive_depth)
+
+
+def _common_rules_dir(db_path: Path, rules_path: Path) -> Path:
+    """Pick a directory that contains both the signature DB and rules.
+
+    The Docker sandbox mounts this directory read-only at ``/rules``.
+    """
+    db = db_path.resolve()
+    rules = rules_path.resolve()
+    if db.parent == rules.parent:
+        return db.parent
+    return db.parent
+
+
 def _scan_directory(
     directory: Path,
     signatures: SignatureRepository,
     rules: HeuristicRuleRepository,
     *,
     max_size: Optional[int],
+    archive_engine: Optional[ArchiveScanEngine],
 ) -> tuple[
     list[HashScanResult],
     list[PatternScanResult],
     list[HeuristicMatch],
+    list[ArchiveFinding],
+    int,
+    int,
     int,
 ]:
     hash_hits: list[HashScanResult] = []
     pattern_hits: list[PatternScanResult] = []
     heuristic_hits: list[HeuristicMatch] = []
+    archive_findings: list[ArchiveFinding] = []
     total = 0
+    archives_unpacked = 0
+    archives_skipped = 0
 
     for path in walk_files(directory, max_file_size=max_size):
         total += 1
         try:
+            if archive_engine is not None and detect_archive_type(path) is not None:
+                outcome = archive_engine.scan(path)
+                archive_findings.extend(outcome.findings)
+                archives_unpacked += outcome.archives_unpacked
+                archives_skipped += outcome.archives_skipped
+                continue
+
             h = scan_file(path, signatures, chunk_size=DEFAULT_CHUNK_SIZE)
             if h is not None:
                 hash_hits.append(h)
@@ -216,7 +377,15 @@ def _scan_directory(
         except OSError as exc:
             logger.warning("skipping %s: %s", path, exc)
 
-    return hash_hits, pattern_hits, heuristic_hits, total
+    return (
+        hash_hits,
+        pattern_hits,
+        heuristic_hits,
+        archive_findings,
+        total,
+        archives_unpacked,
+        archives_skipped,
+    )
 
 
 def run_scan(args: argparse.Namespace) -> int:
@@ -233,6 +402,19 @@ def run_scan(args: argparse.Namespace) -> int:
     if not (0.0 < args.bloom_fp_rate < 1.0):
         _err("--bloom-fp-rate must be in (0, 1)")
         return EXIT_ERROR
+    if args.unpack_archives:
+        if args.archive_depth < 1:
+            _err("--archive-depth must be >= 1")
+            return EXIT_ERROR
+        if args.archive_max_extracted_bytes < 0:
+            _err("--archive-max-extracted-bytes must be non-negative")
+            return EXIT_ERROR
+        if args.archive_max_files < 1:
+            _err("--archive-max-files must be >= 1")
+            return EXIT_ERROR
+        if args.archive_timeout < 1:
+            _err("--archive-timeout must be >= 1")
+            return EXIT_ERROR
 
     try:
         signatures = _load_signatures(
@@ -256,10 +438,28 @@ def run_scan(args: argparse.Namespace) -> int:
         _err(f"invalid heuristic rules: {exc}")
         return EXIT_ERROR
 
+    try:
+        archive_engine = _build_archive_engine(args, signatures, rules)
+    except RuntimeError as exc:
+        _err(str(exc))
+        return EXIT_ERROR
+
     started_at = datetime.now(tz=timezone.utc)
     try:
-        hash_hits, pattern_hits, heuristic_hits, total = _scan_directory(
-            directory, signatures, rules, max_size=args.max_size
+        (
+            hash_hits,
+            pattern_hits,
+            heuristic_hits,
+            archive_findings,
+            total,
+            archives_unpacked,
+            archives_skipped,
+        ) = _scan_directory(
+            directory,
+            signatures,
+            rules,
+            max_size=args.max_size,
+            archive_engine=archive_engine,
         )
     except OSError as exc:
         _err(f"scan failed: {exc}")
@@ -270,9 +470,12 @@ def run_scan(args: argparse.Namespace) -> int:
         hash_results=hash_hits,
         pattern_results=pattern_hits,
         heuristic_matches=heuristic_hits,
+        archive_findings=archive_findings,
         total_files=total,
         started_at=started_at,
         ended_at=ended_at,
+        archives_unpacked=archives_unpacked,
+        archives_skipped=archives_skipped,
     )
 
     report_path = args.report if args.report is not None else default_report_path(

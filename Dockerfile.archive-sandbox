@@ -24,7 +24,7 @@ RUN apt-get update \
 
 WORKDIR /opt/sentinel
 
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src ./src
 COPY scripts/sandbox_entrypoint.py ./scripts/sandbox_entrypoint.py
 

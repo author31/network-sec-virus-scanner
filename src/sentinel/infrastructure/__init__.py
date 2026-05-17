@@ -18,11 +18,16 @@ from .archive_detector import (
     is_archive,
 )
 from .docker_sandbox import (
+    DEFAULT_DOCKERFILE,
     DEFAULT_IMAGE,
     DockerSandboxError,
     SandboxLimits,
     SandboxResult,
     build_docker_command,
+    build_sandbox_image,
+    ensure_sandbox_image,
+    find_sandbox_dockerfile,
+    image_exists,
     is_docker_available,
     run_sandbox,
 )
@@ -30,6 +35,7 @@ from .docker_sandbox import (
 __all__ = [
     "ArchiveType",
     "BloomFilter",
+    "DEFAULT_DOCKERFILE",
     "DEFAULT_IMAGE",
     "DEFAULT_MAX_EXTRACTED_BYTES",
     "DEFAULT_MAX_FILES",
@@ -41,9 +47,13 @@ __all__ = [
     "SandboxResult",
     "USER_AGENT",
     "build_docker_command",
+    "build_sandbox_image",
     "detect_archive_type",
     "detect_archive_type_from_bytes",
+    "ensure_sandbox_image",
     "fetch_getlist",
+    "find_sandbox_dockerfile",
+    "image_exists",
     "is_archive",
     "is_docker_available",
     "run_sandbox",

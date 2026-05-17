@@ -18,6 +18,7 @@ from ..constants import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_IMAGE = "sentinel/archive-sandbox:latest"
+DEFAULT_DOCKERFILE = "Dockerfile.archive-sandbox"
 DEFAULT_TMPFS_BYTES = 512 * 1024 * 1024
 DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1.0"
@@ -58,6 +59,105 @@ def is_docker_available(docker_bin: str = "docker") -> bool:
     return shutil.which(docker_bin) is not None
 
 
+def image_exists(image: str, docker_bin: str = "docker") -> bool:
+    """Return True if ``image`` is present in the local Docker image store."""
+    try:
+        proc = subprocess.run(
+            [docker_bin, "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def build_sandbox_image(
+    *,
+    image: str = DEFAULT_IMAGE,
+    dockerfile: Path,
+    context: Path,
+    docker_bin: str = "docker",
+) -> None:
+    """Build the sandbox image from ``dockerfile`` under ``context``.
+
+    Streams ``docker build`` output to the inherited stdio so the user sees
+    progress. Raises :class:`DockerSandboxError` on non-zero exit.
+    """
+    if not dockerfile.is_file():
+        raise DockerSandboxError(f"dockerfile not found: {dockerfile}")
+    if not context.is_dir():
+        raise DockerSandboxError(f"build context not a directory: {context}")
+
+    cmd = [
+        docker_bin,
+        "build",
+        "-f",
+        str(dockerfile),
+        "-t",
+        image,
+        str(context),
+    ]
+    logger.info("building sandbox image %s from %s", image, dockerfile)
+    try:
+        proc = subprocess.run(cmd, check=False)
+    except OSError as exc:
+        raise DockerSandboxError(f"docker build failed to start: {exc}") from exc
+    if proc.returncode != 0:
+        raise DockerSandboxError(
+            f"docker build exited {proc.returncode} for image {image}"
+        )
+
+
+def find_sandbox_dockerfile(
+    start: Optional[Path] = None,
+    filename: str = DEFAULT_DOCKERFILE,
+) -> Optional[Path]:
+    """Walk upward from ``start`` (default cwd) looking for the Dockerfile.
+
+    Returns the absolute path if found, else ``None``.
+    """
+    current = (start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        path = candidate / filename
+        if path.is_file():
+            return path
+    return None
+
+
+def ensure_sandbox_image(
+    *,
+    image: str = DEFAULT_IMAGE,
+    dockerfile: Optional[Path] = None,
+    context: Optional[Path] = None,
+    docker_bin: str = "docker",
+) -> None:
+    """Ensure ``image`` exists locally, building it if necessary.
+
+    ``dockerfile`` defaults to the result of :func:`find_sandbox_dockerfile`;
+    ``context`` defaults to the dockerfile's parent directory.
+    """
+    if image_exists(image, docker_bin=docker_bin):
+        return
+    if dockerfile is None:
+        dockerfile = find_sandbox_dockerfile()
+        if dockerfile is None:
+            raise DockerSandboxError(
+                f"sandbox image {image} not present locally and "
+                f"{DEFAULT_DOCKERFILE} not found in CWD or any parent"
+            )
+    if context is None:
+        context = dockerfile.parent
+    build_sandbox_image(
+        image=image,
+        dockerfile=dockerfile,
+        context=context,
+        docker_bin=docker_bin,
+    )
+
+
 def build_docker_command(
     *,
     image: str,
@@ -88,7 +188,7 @@ def build_docker_command(
         f"--pids-limit={limits.pids_limit}",
         f"--memory={limits.memory}",
         f"--cpus={limits.cpus}",
-        f"--tmpfs={CONTAINER_WORK_DIR}:rw,nosuid,nodev,noexec,size={limits.tmpfs_bytes}",
+        f"--tmpfs={CONTAINER_WORK_DIR}:rw,nosuid,nodev,noexec,size={limits.tmpfs_bytes},mode=1777,uid={limits.uid},gid={limits.uid}",
         f"--volume={archive_path}:{CONTAINER_ARCHIVE_PATH}:ro",
         f"--volume={out_dir}:{CONTAINER_OUT_DIR}",
         f"--volume={rules_dir}:{CONTAINER_RULES_DIR}:ro",
@@ -184,6 +284,7 @@ __all__ = [
     "CONTAINER_OUT_DIR",
     "CONTAINER_RULES_DIR",
     "CONTAINER_WORK_DIR",
+    "DEFAULT_DOCKERFILE",
     "DEFAULT_IMAGE",
     "DEFAULT_MAX_EXTRACTED_BYTES",
     "DEFAULT_MAX_FILES",
@@ -192,6 +293,10 @@ __all__ = [
     "SandboxLimits",
     "SandboxResult",
     "build_docker_command",
+    "build_sandbox_image",
+    "ensure_sandbox_image",
+    "find_sandbox_dockerfile",
+    "image_exists",
     "is_docker_available",
     "run_sandbox",
 ]

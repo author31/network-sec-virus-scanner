@@ -29,8 +29,10 @@ from ..infrastructure import (
     DEFAULT_MAX_EXTRACTED_BYTES,
     DEFAULT_MAX_FILES,
     DEFAULT_TIMEOUT_SECONDS,
+    DockerSandboxError,
     SandboxLimits,
     detect_archive_type,
+    ensure_sandbox_image,
     is_docker_available,
     walk_files,
     FetchError
@@ -172,6 +174,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     scan.add_argument(
+        "--no-build-sandbox",
+        action="store_true",
+        help=(
+            "Do not auto-build the sandbox image if it is missing locally. "
+            "By default, the image is built from Dockerfile.archive-sandbox "
+            "when not present."
+        ),
+    )
+    scan.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -293,6 +304,11 @@ def _build_archive_engine(
                 "--unpack-archives requires Docker on PATH (or set "
                 f"{BACKEND_ENV_VAR}={BACKEND_LOCAL} for an in-process fallback)"
             )
+        if not args.no_build_sandbox:
+            try:
+                ensure_sandbox_image(image=args.archive_image)
+            except DockerSandboxError as exc:
+                raise RuntimeError(f"sandbox image unavailable: {exc}") from exc
         rules_dir = _common_rules_dir(args.db, args.rules)
         backend = DockerArchiveBackend(
             image=args.archive_image,

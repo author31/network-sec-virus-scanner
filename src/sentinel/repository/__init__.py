@@ -4,14 +4,28 @@ from .heuristic_rule_repository import (
     HeuristicRuleValidationError,
 )
 from .signature import Signature, ThreatLevel
+from .signature_db_writer import (
+    DEFAULT_THREAT_LEVEL,
+    MergeStats,
+    atomic_write_signatures,
+    load_existing_signatures,
+    merge_entries,
+    normalize_entry,
+)
 from .signature_repository import SignatureRepository, SignatureValidationError
 
 __all__ = [
+    "DEFAULT_THREAT_LEVEL",
     "HeuristicRule",
     "HeuristicRuleRepository",
     "HeuristicRuleValidationError",
+    "MergeStats",
     "Signature",
-    "ThreatLevel",
     "SignatureRepository",
     "SignatureValidationError",
+    "ThreatLevel",
+    "atomic_write_signatures",
+    "load_existing_signatures",
+    "merge_entries",
+    "normalize_entry",
 ]

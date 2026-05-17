@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from ..application import HashScanResult, HeuristicMatch, PatternScanResult
+from ..application import (
+    ArchiveFinding,
+    HashScanResult,
+    HeuristicMatch,
+    PatternScanResult,
+)
 from ..repository import ThreatLevel
 
 REPORT_FILENAME_PREFIX = "sentinel_report_"
@@ -26,6 +31,7 @@ class Finding:
     threat_level: ThreatLevel
     timestamp: datetime
     is_heuristic: bool = False
+    is_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,8 @@ class ScanReport:
     total_files: int
     started_at: datetime
     ended_at: datetime
+    archives_unpacked: int = 0
+    archives_skipped: int = 0
     extra_scanned_paths: Sequence[Path] = field(default_factory=tuple)
 
     @property
@@ -49,6 +57,8 @@ class ScanReport:
         infected = self._infected_paths()
         suspicious: set[Path] = set()
         for f in self.findings:
+            if f.is_skipped:
+                continue
             if f.is_heuristic and f.path not in infected:
                 suspicious.add(f.path)
         return len(suspicious)
@@ -58,7 +68,11 @@ class ScanReport:
         return max(0, self.total_files - self.infected_count - self.suspicious_count)
 
     def _infected_paths(self) -> set[Path]:
-        return {f.path for f in self.findings if not f.is_heuristic}
+        return {
+            f.path
+            for f in self.findings
+            if not f.is_heuristic and not f.is_skipped
+        }
 
 
 def finding_from_hash(
@@ -100,6 +114,28 @@ def finding_from_heuristic(
     )
 
 
+def finding_from_archive(
+    archive_finding: ArchiveFinding,
+    *,
+    timestamp: Optional[datetime] = None,
+) -> Finding:
+    """Convert an :class:`ArchiveFinding` to a report :class:`Finding`.
+
+    Provenance paths (``outer.zip!inner.tar!payload.exe``) are stored
+    verbatim — they are virtual paths, not filesystem paths, so we do not
+    resolve them.
+    """
+    return Finding(
+        path=Path(archive_finding.provenance),
+        detection_method=archive_finding.detection_method,
+        signature_name=archive_finding.signature_name,
+        threat_level=archive_finding.threat_level,
+        timestamp=_now(timestamp),
+        is_heuristic=archive_finding.is_heuristic,
+        is_skipped=archive_finding.is_skipped,
+    )
+
+
 def default_report_path(
     *, now: Optional[datetime] = None, base_dir: Optional[Path] = None
 ) -> Path:
@@ -133,9 +169,12 @@ def build_report(
     hash_results: Iterable[HashScanResult] = (),
     pattern_results: Iterable[PatternScanResult] = (),
     heuristic_matches: Iterable[HeuristicMatch] = (),
+    archive_findings: Iterable[ArchiveFinding] = (),
     total_files: int,
     started_at: datetime,
     ended_at: datetime,
+    archives_unpacked: int = 0,
+    archives_skipped: int = 0,
     timestamp: Optional[datetime] = None,
 ) -> ScanReport:
     """Convert engine results into a :class:`ScanReport`.
@@ -150,6 +189,8 @@ def build_report(
         findings.append(finding_from_pattern(r, timestamp=timestamp))
     for m in heuristic_matches:
         findings.append(finding_from_heuristic(m, timestamp=timestamp))
+    for a in archive_findings:
+        findings.append(finding_from_archive(a, timestamp=timestamp))
 
     findings.sort(key=lambda f: (str(f.path), f.timestamp, f.signature_name))
 
@@ -158,6 +199,8 @@ def build_report(
         total_files=total_files,
         started_at=started_at,
         ended_at=ended_at,
+        archives_unpacked=archives_unpacked,
+        archives_skipped=archives_skipped,
     )
 
 
@@ -183,6 +226,8 @@ def _format_summary(report: ScanReport) -> list[str]:
         f"Clean:          {report.clean_count}",
         f"Infected:       {report.infected_count}",
         f"Suspicious:     {report.suspicious_count}",
+        f"Archives unpacked: {report.archives_unpacked}",
+        f"Archives skipped:  {report.archives_skipped}",
         SUMMARY_FOOTER,
     ]
 

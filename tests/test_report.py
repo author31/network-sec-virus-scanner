@@ -231,7 +231,7 @@ def test_default_report_path_uses_cwd_when_no_base(
     monkeypatch.chdir(tmp_path)
     fixed = datetime(2026, 5, 15, 13, 4, 5, tzinfo=timezone.utc)
     path = default_report_path(now=fixed)
-    assert path.parent == tmp_path
+    assert path.parent == tmp_path / "logs"
     assert path.name.startswith(REPORT_FILENAME_PREFIX)
     assert path.name.endswith(REPORT_FILENAME_SUFFIX)
 

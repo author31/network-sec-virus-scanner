@@ -22,8 +22,10 @@ from .hash_scan_engine import (
     DETECTION_METHOD_SHA256,
     HashScanResult,
     compute_hashes,
+    lookup_hashes,
     scan_file,
 )
+from .indexed_hash_scan_engine import scan_file_indexed
 from .heuristic_scan_engine import (
     DEFAULT_MAX_BYTES,
     DEFAULT_SNIPPET_RADIUS,
@@ -55,9 +57,11 @@ __all__ = [
     "PROVENANCE_SEPARATOR",
     "PatternScanResult",
     "compute_hashes",
+    "lookup_hashes",
     "refresh",
     "scan_archive_in_process",
     "scan_file",
     "scan_file_heuristic",
+    "scan_file_indexed",
     "scan_file_patterns",
 ]

@@ -8,6 +8,7 @@ from typing import Iterable, Optional, Sequence
 
 from ..application import (
     ArchiveFinding,
+    EntropyScanResult,
     HashScanResult,
     HeuristicMatch,
     PatternScanResult,
@@ -115,6 +116,19 @@ def finding_from_heuristic(
     )
 
 
+def finding_from_entropy(
+    result: EntropyScanResult, *, timestamp: Optional[datetime] = None
+) -> Finding:
+    return Finding(
+        path=_abs(result.path),
+        detection_method=result.detection_method,
+        signature_name=f"high-entropy({result.entropy:.3f})",
+        threat_level=result.threat_level,
+        timestamp=_now(timestamp),
+        is_heuristic=True,
+    )
+
+
 def finding_from_archive(
     archive_finding: ArchiveFinding,
     *,
@@ -170,6 +184,7 @@ def build_report(
     hash_results: Iterable[HashScanResult] = (),
     pattern_results: Iterable[PatternScanResult] = (),
     heuristic_matches: Iterable[HeuristicMatch] = (),
+    entropy_results: Iterable[EntropyScanResult] = (),
     archive_findings: Iterable[ArchiveFinding] = (),
     total_files: int,
     started_at: datetime,
@@ -190,6 +205,8 @@ def build_report(
         findings.append(finding_from_pattern(r, timestamp=timestamp))
     for m in heuristic_matches:
         findings.append(finding_from_heuristic(m, timestamp=timestamp))
+    for e in entropy_results:
+        findings.append(finding_from_entropy(e, timestamp=timestamp))
     for a in archive_findings:
         findings.append(finding_from_archive(a, timestamp=timestamp))
 

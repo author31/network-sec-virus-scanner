@@ -11,16 +11,20 @@ from typing import Optional, Sequence
 from ..application import (
     DEFAULT_ARCHIVE_DEPTH,
     DEFAULT_CHUNK_SIZE,
+    DEFAULT_ENTROPY_THRESHOLD,
     DEFAULT_MAX_BYTES,
     ArchiveFinding,
     ArchiveScanEngine,
+    DaemonScanService,
     DockerArchiveBackend,
+    EntropyScanResult,
     HashScanResult,
     HeuristicMatch,
     LocalArchiveBackend,
     PatternScanResult,
     refresh,
     scan_file,
+    scan_file_entropy,
     scan_file_heuristic,
     scan_file_indexed,
     scan_file_patterns,
@@ -32,11 +36,14 @@ from ..infrastructure import (
     DEFAULT_TIMEOUT_SECONDS,
     DockerSandboxError,
     SandboxLimits,
+    daemon_status,
+    default_pid_path,
     detect_archive_type,
     ensure_sandbox_image,
     is_docker_available,
+    stop_daemon,
     walk_files,
-    FetchError
+    FetchError,
 )
 from ..repository import (
     DEFAULT_THREAT_LEVEL,
@@ -203,6 +210,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     scan.add_argument(
+        "--entropy-threshold",
+        type=float,
+        default=DEFAULT_ENTROPY_THRESHOLD,
+        metavar="THRESHOLD",
+        help=(
+            "Normalised Shannon entropy threshold (0.0-1.0). Files at or "
+            f"above this level are flagged suspicious (default: {DEFAULT_ENTROPY_THRESHOLD})."
+        ),
+    )
+    scan.add_argument(
+        "--no-entropy",
+        action="store_true",
+        help="Disable entropy-based heuristic analysis.",
+    )
+    scan.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -250,6 +272,93 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Increase log verbosity (-v info, -vv debug).",
     )
+
+    daemon = sub.add_parser(
+        "daemon",
+        help="Run Sentinel as a background daemon watching a directory.",
+        description=(
+            "Start, stop, or query a long-running Sentinel daemon that "
+            "watches a directory for new/modified files and scans them "
+            "with all heuristic engines (regex, entropy) enabled by default."
+        ),
+    )
+    daemon_sub = daemon.add_subparsers(
+        dest="daemon_action", required=True, metavar="ACTION"
+    )
+
+    daemon_start = daemon_sub.add_parser(
+        "start", help="Start the daemon in the background."
+    )
+    daemon_start.add_argument("directory", type=Path, help="Directory to watch.")
+    daemon_start.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"Signature DB JSON path (default: {DEFAULT_DB_PATH}).",
+    )
+    daemon_start.add_argument(
+        "--rules",
+        type=Path,
+        default=DEFAULT_RULES_PATH,
+        help=f"Heuristic rules JSON path (default: {DEFAULT_RULES_PATH}).",
+    )
+    daemon_start.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Daemon findings log path (default: logs/sentinel_daemon.log).",
+    )
+    daemon_start.add_argument(
+        "--pid-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=f"PID file path (default: {default_pid_path()}).",
+    )
+    daemon_start.add_argument(
+        "--entropy-threshold",
+        type=float,
+        default=DEFAULT_ENTROPY_THRESHOLD,
+        metavar="THRESHOLD",
+        help=(
+            "Normalised Shannon entropy threshold (0.0-1.0). "
+            f"(default: {DEFAULT_ENTROPY_THRESHOLD})."
+        ),
+    )
+    daemon_start.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in the foreground instead of daemonising.",
+    )
+    daemon_start.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase log verbosity (-v info, -vv debug).",
+    )
+
+    daemon_stop = daemon_sub.add_parser("stop", help="Stop the running daemon.")
+    daemon_stop.add_argument(
+        "--pid-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=f"PID file path (default: {default_pid_path()}).",
+    )
+
+    daemon_status_cmd = daemon_sub.add_parser(
+        "status", help="Check whether the daemon is running."
+    )
+    daemon_status_cmd.add_argument(
+        "--pid-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=f"PID file path (default: {default_pid_path()}).",
+    )
+
     return parser
 
 
@@ -359,10 +468,12 @@ def _scan_directory(
     max_size: Optional[int],
     archive_engine: Optional[ArchiveScanEngine],
     file_index: Optional[FileIndexRepository] = None,
+    entropy_threshold: Optional[float] = DEFAULT_ENTROPY_THRESHOLD,
 ) -> tuple[
     list[HashScanResult],
     list[PatternScanResult],
     list[HeuristicMatch],
+    list[EntropyScanResult],
     list[ArchiveFinding],
     int,
     int,
@@ -372,6 +483,7 @@ def _scan_directory(
     hash_hits: list[HashScanResult] = []
     pattern_hits: list[PatternScanResult] = []
     heuristic_hits: list[HeuristicMatch] = []
+    entropy_hits: list[EntropyScanResult] = []
     archive_findings: list[ArchiveFinding] = []
     total = 0
     archives_unpacked = 0
@@ -407,6 +519,10 @@ def _scan_directory(
             heuristic_hits.extend(
                 scan_file_heuristic(path, rules, max_bytes=DEFAULT_MAX_BYTES)
             )
+            if entropy_threshold is not None:
+                e = scan_file_entropy(path, threshold=entropy_threshold)
+                if e is not None:
+                    entropy_hits.append(e)
         except OSError as exc:
             logger.warning("skipping %s: %s", path, exc)
 
@@ -414,6 +530,7 @@ def _scan_directory(
         hash_hits,
         pattern_hits,
         heuristic_hits,
+        entropy_hits,
         archive_findings,
         total,
         archives_unpacked,
@@ -486,12 +603,20 @@ def run_scan(args: argparse.Namespace) -> int:
             _err(f"invalid file index: {exc}")
             return EXIT_ERROR
 
+    entropy_threshold: Optional[float] = None
+    if not args.no_entropy:
+        if not (0.0 <= args.entropy_threshold <= 1.0):
+            _err("--entropy-threshold must be in [0.0, 1.0]")
+            return EXIT_ERROR
+        entropy_threshold = args.entropy_threshold
+
     started_at = datetime.now(tz=timezone.utc)
     try:
         (
             hash_hits,
             pattern_hits,
             heuristic_hits,
+            entropy_hits,
             archive_findings,
             total,
             archives_unpacked,
@@ -504,6 +629,7 @@ def run_scan(args: argparse.Namespace) -> int:
             max_size=args.max_size,
             archive_engine=archive_engine,
             file_index=file_index,
+            entropy_threshold=entropy_threshold,
         )
     except OSError as exc:
         _err(f"scan failed: {exc}")
@@ -521,6 +647,7 @@ def run_scan(args: argparse.Namespace) -> int:
         hash_results=hash_hits,
         pattern_results=pattern_hits,
         heuristic_matches=heuristic_hits,
+        entropy_results=entropy_hits,
         archive_findings=archive_findings,
         total_files=total,
         started_at=started_at,
@@ -589,6 +716,79 @@ def run_update(args: argparse.Namespace) -> int:
     return EXIT_CLEAN
 
 
+DEFAULT_DAEMON_LOG = Path("logs/sentinel_daemon.log")
+
+
+def run_daemon(args: argparse.Namespace) -> int:
+    action: str = args.daemon_action
+    pid_path = args.pid_file if args.pid_file is not None else default_pid_path()
+
+    if action == "stop":
+        ok, msg = stop_daemon(pid_path)
+        print(msg)
+        return EXIT_CLEAN if ok else EXIT_ERROR
+
+    if action == "status":
+        alive, msg = daemon_status(pid_path)
+        print(msg)
+        return EXIT_CLEAN if alive else EXIT_ERROR
+
+    directory: Path = args.directory
+    if not directory.exists():
+        _err(f"directory not found: {directory}")
+        return EXIT_ERROR
+    if not directory.is_dir():
+        _err(f"not a directory: {directory}")
+        return EXIT_ERROR
+
+    running, _ = daemon_status(pid_path)
+    if running:
+        _err("daemon already running (use 'sentinel daemon stop' first)")
+        return EXIT_ERROR
+
+    if not (0.0 <= args.entropy_threshold <= 1.0):
+        _err("--entropy-threshold must be in [0.0, 1.0]")
+        return EXIT_ERROR
+
+    try:
+        signatures = _load_signatures(args.db)
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return EXIT_ERROR
+    except SignatureValidationError as exc:
+        _err(f"invalid signature DB: {exc}")
+        return EXIT_ERROR
+
+    try:
+        rules = _load_rules(args.rules)
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return EXIT_ERROR
+    except HeuristicRuleValidationError as exc:
+        _err(f"invalid heuristic rules: {exc}")
+        return EXIT_ERROR
+
+    log_path = args.log if args.log is not None else DEFAULT_DAEMON_LOG
+
+    service = DaemonScanService(
+        directory=directory.resolve(),
+        signatures=signatures,
+        rules=rules,
+        log_path=log_path.resolve(),
+        entropy_threshold=args.entropy_threshold,
+        pid_path=pid_path,
+    )
+
+    if args.foreground:
+        print(f"running in foreground, watching {directory}, log -> {log_path}")
+        service.run_foreground()
+        return EXIT_CLEAN
+
+    print(f"starting daemon, watching {directory}, log -> {log_path}")
+    service.daemonize()
+    return EXIT_CLEAN
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -598,6 +798,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_scan(args)
     if args.command == "update":
         return run_update(args)
+    if args.command == "daemon":
+        return run_daemon(args)
 
     parser.error(f"unknown command: {args.command}")
     return EXIT_ERROR

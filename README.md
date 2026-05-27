@@ -1,20 +1,24 @@
 # Sentinel
 
 Sentinel is a small, educational virus scanner written in Python. It walks a
-directory tree and inspects every file with three complementary engines:
+directory tree and inspects every file with four complementary engines:
 
 - **Hash scan** — MD5 and SHA-256 lookup against a signature database.
 - **Byte-pattern scan** — hex-pattern (e.g. EICAR prefix) lookup against the
   same database.
 - **Heuristic scan** — configurable regex rules that flag suspicious content
   (PowerShell encoded commands, shell `eval(` markers, long base64 blobs, …).
+- **Entropy analysis** — normalised Shannon entropy of file bytes; files at or
+  above a configurable threshold (default 0.75) are flagged as suspicious,
+  catching packed / encrypted / obfuscated payloads that evade signature
+  matching.
+
+Sentinel can run as a **one-shot CLI** or as a **background daemon** that
+watches a directory in real time using OS-native filesystem events (watchdog /
+inotify).
 
 A scan emits a single log report listing every finding plus a summary block,
 and exits non-zero when anything is flagged so it can drive CI gates.
-
-**Scope.** Linux, Python 3.12+. Sentinel is a teaching / demo tool — it is
-not a production antivirus, has no realtime protection, no sandbox, and does
-not unpack archives. See [Limitations](#limitations).
 
 ## Install
 
@@ -41,9 +45,12 @@ uv run sentinel scan --help
 
 ## Usage
 
+### One-shot scan
+
 ```
 sentinel scan DIR [--db PATH] [--rules PATH] [--report PATH]
-                  [--max-size BYTES] [-v|-vv]
+                  [--max-size BYTES] [--entropy-threshold F]
+                  [--no-entropy] [-v|-vv]
 ```
 
 | Flag | Default | Purpose |
@@ -52,9 +59,36 @@ sentinel scan DIR [--db PATH] [--rules PATH] [--report PATH]
 | `--rules` | `data/heuristic_rules.example.json` | Heuristic rules JSON path. |
 | `--report` | `./sentinel_report_<UTC>.log` | Report output file. |
 | `--max-size` | _(none)_ | Skip files larger than this many bytes. |
+| `--entropy-threshold` | `0.75` | Normalised Shannon entropy threshold (0.0–1.0). |
+| `--no-entropy` | _(off)_ | Disable entropy analysis entirely. |
 | `-v` / `-vv` | _warn_ | Increase log verbosity (info / debug). |
 
 Exit codes: `0` clean, `1` infected or suspicious, `2` error.
+
+### Daemon mode
+
+```
+sentinel daemon start DIR [--db PATH] [--rules PATH] [--log PATH]
+                          [--pid-file PATH] [--entropy-threshold F]
+                          [--foreground] [-v|-vv]
+sentinel daemon stop  [--pid-file PATH]
+sentinel daemon status [--pid-file PATH]
+```
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--log` | `logs/sentinel_daemon.log` | Append findings here. |
+| `--pid-file` | `/tmp/sentinel/sentinel-daemon.pid` | PID file for lifecycle management. |
+| `--entropy-threshold` | `0.75` | Entropy threshold (same as scan). |
+| `--foreground` | _(off)_ | Stay in the terminal instead of daemonising. |
+
+`start` double-forks to background, writes a PID file, and watches the
+directory tree with **watchdog** (inotify on Linux). Every created or modified
+file is scanned immediately with all engines — hash, byte-pattern, heuristic
+regex, and entropy — with findings appended to the log file.
+
+`stop` sends SIGTERM via the PID file. `status` probes whether the daemon
+process is alive.
 
 ### EICAR demo (≈30 seconds)
 
@@ -186,24 +220,6 @@ End-to-end smoke test:
 uv run pytest tests/test_demo_tree_smoke.py
 ```
 
-## Limitations
-
-- **Not a real antivirus.** Signature coverage is intentionally tiny (an
-  EICAR canary plus whatever you import via Malshare). Heuristics are simple
-  regex rules — easy to fool with light obfuscation.
-- **Archive unpacking is optional and container-sandboxed (off by
-  default).** Pass `--unpack-archives` to extract zip / tar / gzip / bz2 /
-  xz / 7z / rar inside an isolated Docker container and scan their
-  contents. See [Archive unpacking](#archive-unpacking) below. Without the
-  flag, archives are scanned as opaque blobs (the historical behavior).
-- **No realtime / on-access scanning.** Sentinel is a one-shot CLI.
-- **Linux-only.** Tested on Linux + CPython 3.12; paths and permissions are
-  not validated on other platforms.
-- **Whole-file regex.** Heuristic content is read up to a bounded ceiling per
-  file; very large files may have content past the ceiling skipped.
-
-Treat findings as hints, not verdicts.
-
 ## Archive unpacking
 
 When `--unpack-archives` is set, each archive encountered by the directory
@@ -255,26 +271,3 @@ without Docker (test runners, dev loops), set
 `SENTINEL_ARCHIVE_BACKEND=local` to run the same extract-and-scan logic
 in-process — without sandbox isolation. **Do not enable the local backend
 on untrusted input.**
-
-## Roadmap
-
-- **Bloom filter** in front of the hash repository to keep large signature
-  DBs cheap to query.
-- **Parallel scan** across files (process pool) for big trees.
-- **Streaming heuristic engine** so very large files aren't bounded by the
-  in-memory read ceiling.
-
-## Shipped
-
-- **Archive unpacking** (zip / tar / gzip / bz2 / xz / 7z / rar) with a
-  configurable depth cap and per-archive Docker sandbox.
-
-## Development
-
-```bash
-uv sync                  # install dev deps (pytest)
-uv run pytest            # run the full suite
-uv run pytest tests/test_demo_tree_smoke.py   # just the smoke test
-```
-
-See [`CLAUDE.md`](CLAUDE.md) for project conventions (uv only, DDD layout).
